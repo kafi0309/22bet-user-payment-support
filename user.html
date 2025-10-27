@@ -40,9 +40,9 @@
             <span class="visually-hidden">Message</span>
             <textarea id="user-message" rows="1" placeholder="Type your message..." required></textarea>
           </label>
-          <div class="user-attachment-bar">
-            <label class="user-attach-button" title="Max 5 MB per file">
-              <input type="file" id="user-file-input" multiple>
+          <div class="user-attachment-bar" hidden>
+            <label class="user-attach-button" title="Max 5 MB per file" hidden>
+              <input type="file" id="user-file-input" multiple disabled>
               Attach files
             </label>
             <div class="user-attachment-preview" id="user-attachment-preview" hidden></div>
@@ -54,19 +54,16 @@
     </main>
   </div>
   <script>
-    const LOCAL_DEV_HOSTS = ["localhost", "127.0.0.1"];
-    const isLocalEnv = LOCAL_DEV_HOSTS.includes(location.hostname) || /^192\.168\./.test(location.hostname) || location.hostname.endsWith(".local");
-    window.SUPPORT_SOCKET_URL = window.SUPPORT_SOCKET_URL || (isLocalEnv ? `${location.protocol}//${location.hostname}:3100` : "");
-    const socketScript = document.createElement('script');
-    socketScript.src = `${window.SUPPORT_SOCKET_URL || ''}/socket.io/socket.io.js`;
-    socketScript.onload = () => {
-      const userScript = document.createElement('script');
-      userScript.src = 'user.js';
-      document.body.appendChild(userScript);
+    window.FIREBASE_CONFIG = {
+      apiKey: "AIzaSyBuQJi0h4qGivNWJd84wxVYeImVp8u72_o",
+      authDomain: "bet-support-chat.firebaseapp.com",
+      projectId: "bet-support-chat",
+      storageBucket: "bet-support-chat.firebasestorage.app",
+      messagingSenderId: "765654305423",
+      appId: "1:765654305423:web:0ad18a74404ac149d83efa"
     };
-    socketScript.onerror = () => console.error('Unable to load chat transport script');
-    document.body.appendChild(socketScript);
   </script>
+  <script type="module" src="user.js"></script>
 </body>
 </html>
 
