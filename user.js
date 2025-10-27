@@ -1,9 +1,30 @@
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+import {
+  getFirestore,
+  doc,
+  collection,
+  setDoc,
+  updateDoc,
+  addDoc,
+  serverTimestamp,
+  onSnapshot,
+  query,
+  orderBy,
+} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+import {
+  getStorage,
+  ref as storageRef,
+  uploadBytes,
+  getDownloadURL,
+} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-storage.js";
+
 const timelineEl = document.getElementById("user-timeline");
 const statusLabel = document.getElementById("user-status-label");
 const form = document.getElementById("user-form");
 const nameInput = document.getElementById("user-name");
 const emailInput = document.getElementById("user-email");
 const messageInput = document.getElementById("user-message");
+const sendButton = form.querySelector(".user-send");
 const identitySection = document.querySelector(".user-form__identity");
 const hintText = document.querySelector(".user-form__hint");
 const fileInput = document.getElementById("user-file-input");
@@ -14,28 +35,34 @@ const CHAT_ID_STORAGE_KEY = "support_inbox_chat_id";
 const notificationAudio = new Audio("notification/notification.mp3");
 notificationAudio.preload = "auto";
 
-let socket = null;
+let db = null;
+let storage = null;
 let activeConversation = null;
 let pendingAttachments = [];
 let isComposerEnabled = true;
+let isSendingMessage = false;
+let chatRef = null;
+let chatUnsubscribe = null;
+let messagesUnsubscribe = null;
+let messagesReady = false;
+let pendingChatPromise = null;
 
-
-function updateIdentityVisibility() {
-  if (!identitySection) return;
-  const hasChat = !!activeConversation;
-  identitySection.hidden = hasChat;
-  identitySection.style.display = hasChat ? 'none' : '';
-  if (hintText) {
-    hintText.hidden = hasChat;
-    hintText.style.display = hasChat ? 'none' : '';
-  }
-}
 init();
 
 function init() {
+  if (!window.FIREBASE_CONFIG) {
+    updateStatusLabel("Chat temporarily unavailable. Please reload later.");
+    console.error("Missing Firebase configuration");
+    return;
+  }
+
+  const app = initializeApp(window.FIREBASE_CONFIG);
+  db = getFirestore(app);
+  storage = getStorage(app);
+
   setupForm();
   setupFileUploads();
-  initSocket();
+  restoreExistingChat();
   render();
 }
 
@@ -45,147 +72,332 @@ function setupForm() {
 }
 
 function setupFileUploads() {
-  fileInput.addEventListener("change", async (event) => {
+  fileInput.addEventListener("change", (event) => {
     const files = Array.from(event.target.files || []);
     for (const file of files) {
       if (file.size > MAX_ATTACHMENT_SIZE) {
         alert(`${file.name} exceeds the 5MB limit.`);
         continue;
       }
-      try {
-        const dataUrl = await readFileAsDataUrl(file);
-        pendingAttachments.push({
-          id: generateId(),
-          name: file.name,
-          size: file.size,
-          friendlySize: formatFileSize(file.size),
-          type: file.type,
-          extension: extractExtension(file.name),
-          dataUrl,
-        });
-      } catch (error) {
-        console.error("Unable to attach file", error);
-      }
+      pendingAttachments.push({
+        id: generateId(),
+        file,
+        name: file.name,
+        size: file.size,
+        friendlySize: formatFileSize(file.size),
+        type: file.type,
+        extension: extractExtension(file.name),
+      });
     }
     fileInput.value = "";
     renderAttachmentPreview();
   });
 }
 
-function initSocket() {
-  const LOCAL_DEV_HOSTS = ["localhost", "127.0.0.1"];
-  const isLocalEnv =
-    LOCAL_DEV_HOSTS.includes(location.hostname) ||
-    /^192\.168\./.test(location.hostname) ||
-    location.hostname.endsWith(".local");
-  const baseUrl = (window.SUPPORT_SOCKET_URL || "").trim() || (isLocalEnv ? `${location.protocol}//${location.hostname}:3100` : "");
-
-  socket = io(baseUrl, { query: { role: "visitor" } });
-
-  socket.on("connect", handleConnect);
-  socket.on("connect_error", (err) => updateStatusLabel(`Connection issue: ${err.message}`));
-  socket.on("disconnect", () => updateStatusLabel("Disconnected. Attempting to reconnect..."));
-
-  socket.on("chat:init", handleChatInit);
-  socket.on("chat:message", ({ chatId, message }) => {
-    if (!activeConversation || chatId !== activeConversation.id) return;
-    appendMessage(message);
-    if (message.sender === "agent") {
-      playNotificationSound();
-    }
-  });
-
-  socket.on("chat:updated", (chat) => {
-    if (!activeConversation || chat.id !== activeConversation.id) return;
-    activeConversation = {
-      ...activeConversation,
-      ...chat,
-      messages: activeConversation.messages,
-    };
-    applyComposerState();
-    renderStatus();
-  });
-
-  socket.on("chat:deleted", ({ chatId }) => {
-    if (activeConversation && activeConversation.id === chatId) {
-      activeConversation = null;
-      localStorage.removeItem(CHAT_ID_STORAGE_KEY);
-      render();
-      updateStatusLabel("Chat ended by support team.");
-    }
-  });
-}
-
-function handleConnect() {
-  updateStatusLabel("Connected to support");
+function restoreExistingChat() {
   const storedChatId = localStorage.getItem(CHAT_ID_STORAGE_KEY);
-  socket.emit("visitor:init", {
-    chatId: storedChatId || null,
-    name: nameInput.value.trim() || null,
-    email: emailInput.value.trim() || null,
-  });
+  if (storedChatId) {
+    subscribeToChat(storedChatId);
+  } else {
+    updateStatusLabel("Start a message and our team will reply here.");
+  }
 }
 
-function handleChatInit(chat) {
-  activeConversation = {
-    ...chat,
-    messages: Array.isArray(chat.messages) ? chat.messages.slice() : [],
-  };
-  if (chat.id) {
-    localStorage.setItem(CHAT_ID_STORAGE_KEY, chat.id);
-  }
-  if (chat.visitorName && nameInput.value.trim() === "") {
-    nameInput.value = chat.visitorName;
-  }
-  if (chat.visitorEmail && emailInput.value.trim() === "") {
-    emailInput.value = chat.visitorEmail;
-  }
-  applyComposerState();
-  render();
-  updateIdentityVisibility();
-  updateIdentityVisibility();
-}
-
-function onSubmitMessage(event) {
+async function onSubmitMessage(event) {
   event.preventDefault();
-  if (!socket || !socket.connected || !activeConversation) return;
-
-  const name = nameInput.value.trim();
-  const email = emailInput.value.trim();
-  if (name && name !== activeConversation.visitorName) {
-    socket.emit("visitor:update-name", { chatId: activeConversation.id, name });
-  }
-  if (email && email !== activeConversation.visitorEmail) {
-    socket.emit("visitor:update-name", { chatId: activeConversation.id, email });
-  }
+  if (!db || isSendingMessage) return;
 
   const text = messageInput.value.trim();
   if (!text && pendingAttachments.length === 0) return;
 
-  socket.emit("visitor:message", {
-    chatId: activeConversation.id,
-    body: text,
-    attachments: pendingAttachments.map((file) => ({
-      id: file.id,
-      name: file.name,
-      size: file.size,
-      friendlySize: file.friendlySize,
-      type: file.type,
-      extension: file.extension,
-      dataUrl: file.dataUrl,
-    })),
-  });
+  const name = nameInput.value.trim();
+  const email = emailInput.value.trim();
 
-  messageInput.value = "";
-  autoResizeTextarea();
-  pendingAttachments = [];
-  renderAttachmentPreview();
-  updateIdentityVisibility();
+  try {
+    isSendingMessage = true;
+    applyComposerState();
+
+    const chatId = await ensureChat(name, email);
+    await maybeUpdateVisitorDetails(chatId, name, email);
+
+    const attachments = await uploadPendingAttachments(chatId);
+    const ts = serverTimestamp();
+    await addDoc(collection(chatRef, "messages"), {
+      sender: "visitor",
+      text,
+      attachments,
+      ts,
+    });
+
+    const preview =
+      text ||
+      (attachments.length
+        ? `${attachments.length} file${attachments.length > 1 ? "s" : ""}`
+        : "Message");
+
+    await updateDoc(chatRef, {
+      updatedAt: ts,
+      lastMessagePreview: preview,
+      lastMessageSender: "visitor",
+      lastMessageTs: ts,
+    });
+
+    await logActivity(
+      chatId,
+      text ? "Visitor message" : "Visitor shared files",
+      text ? text.slice(0, 120) : attachments.map((file) => file.name).join(", ")
+    );
+
+    messageInput.value = "";
+    autoResizeTextarea();
+    pendingAttachments = [];
+    renderAttachmentPreview();
+    updateIdentityVisibility();
+  } catch (error) {
+    console.error("Failed to send visitor message", error);
+    alert("Unable to send your message right now. Please try again.");
+  } finally {
+    isSendingMessage = false;
+    applyComposerState();
+  }
 }
 
-function appendMessage(message) {
-  activeConversation.messages.push(message);
-  renderTimeline();
+async function ensureChat(name, email) {
+  if (activeConversation && activeConversation.id) {
+    return activeConversation.id;
+  }
+  if (pendingChatPromise) {
+    return pendingChatPromise;
+  }
+  pendingChatPromise = createChat(name, email)
+    .then((id) => {
+      pendingChatPromise = null;
+      return id;
+    })
+    .catch((error) => {
+      pendingChatPromise = null;
+      throw error;
+    });
+  return pendingChatPromise;
+}
+
+async function createChat(name, email) {
+  const chatDocRef = doc(collection(db, "chats"));
+  const ts = serverTimestamp();
+  await setDoc(chatDocRef, {
+    visitorName: name || null,
+    visitorEmail: email || null,
+    status: "open",
+    allowUploads: true,
+    agentNote: "",
+    followUp: null,
+    channel: "Web chat",
+    priority: "normal",
+    assignedTo: "Unassigned",
+    lastMessagePreview: "",
+    lastMessageSender: "",
+    createdAt: ts,
+    updatedAt: ts,
+  });
+
+  const chatId = chatDocRef.id;
+  localStorage.setItem(CHAT_ID_STORAGE_KEY, chatId);
+
+  activeConversation = {
+    id: chatId,
+    visitorName: name || "",
+    visitorEmail: email || "",
+    status: "open",
+    allowUploads: true,
+    messages: [],
+  };
+
+  subscribeToChat(chatId);
+  await logActivity(chatId, "Chat started", name ? `Visitor: ${name}` : "New visitor");
+  updateStatusLabel("Connected to support");
+  return chatId;
+}
+
+function subscribeToChat(chatId) {
+  if (chatUnsubscribe) {
+    chatUnsubscribe();
+    chatUnsubscribe = null;
+  }
+  if (messagesUnsubscribe) {
+    messagesUnsubscribe();
+    messagesUnsubscribe = null;
+  }
+
+  chatRef = doc(db, "chats", chatId);
+  messagesReady = false;
+
+  chatUnsubscribe = onSnapshot(
+    chatRef,
+    (snapshot) => {
+      if (!snapshot.exists()) {
+        handleChatClosed();
+        return;
+      }
+      const data = snapshot.data();
+      activeConversation = {
+        ...(activeConversation || { id: chatId, messages: [] }),
+        id: chatId,
+        visitorName: data.visitorName || "",
+        visitorEmail: data.visitorEmail || "",
+        status: data.status || "open",
+        allowUploads: data.allowUploads !== false,
+        createdAt: toMillis(data.createdAt),
+        updatedAt: toMillis(data.updatedAt),
+      };
+      renderStatus();
+      applyComposerState();
+      updateIdentityVisibility();
+    },
+    (error) => {
+      console.error("Chat subscription error", error);
+      updateStatusLabel("Connection issue. Retrying…");
+    }
+  );
+
+  const messagesQuery = query(
+    collection(chatRef, "messages"),
+    orderBy("ts", "asc")
+  );
+
+  messagesUnsubscribe = onSnapshot(
+    messagesQuery,
+    (snapshot) => {
+      const messages = snapshot.docs.map((docSnap) => {
+        const messageData = docSnap.data();
+        return {
+          id: docSnap.id,
+          sender: messageData.sender || "system",
+          text: messageData.text || "",
+          attachments: Array.isArray(messageData.attachments)
+            ? messageData.attachments.map((file) => ({
+                ...file,
+                friendlySize: file.friendlySize || formatFileSize(file.size || 0),
+              }))
+            : [],
+          ts: toMillis(messageData.ts),
+        };
+      });
+
+      if (messagesReady) {
+        snapshot.docChanges().forEach((change) => {
+          if (
+            change.type === "added" &&
+            change.doc.data().sender === "agent"
+          ) {
+            playNotificationSound();
+          }
+        });
+      }
+
+      messagesReady = true;
+      activeConversation = {
+        ...(activeConversation || { id: chatId }),
+        id: chatId,
+        messages,
+      };
+      renderTimeline();
+    },
+    (error) => console.error("Messages subscription error", error)
+  );
+}
+
+async function maybeUpdateVisitorDetails(chatId, name, email) {
+  if (!chatRef || !activeConversation) return;
+  const updates = {};
+  const nameChanged =
+    (name && name !== activeConversation.visitorName) ||
+    (!name && activeConversation.visitorName);
+  const emailChanged =
+    (email && email !== activeConversation.visitorEmail) ||
+    (!email && activeConversation.visitorEmail);
+
+  if (nameChanged) {
+    updates.visitorName = name || null;
+  }
+  if (emailChanged) {
+    updates.visitorEmail = email || null;
+  }
+
+  if (Object.keys(updates).length === 0) return;
+
+  updates.updatedAt = serverTimestamp();
+  try {
+    await updateDoc(chatRef, updates);
+    await logActivity(
+      chatId,
+      "Visitor details updated",
+      `${name || "Guest"}${email ? ` • ${email}` : ""}`
+    );
+  } catch (error) {
+    console.error("Unable to update visitor profile", error);
+  }
+}
+
+async function uploadPendingAttachments(chatId) {
+  if (!pendingAttachments.length) return [];
+  const uploads = [];
+
+  for (const attachment of pendingAttachments) {
+    const safeName = sanitizeFileName(attachment.name);
+    const path = `chats/${chatId}/visitor/${Date.now()}_${attachment.id}_${safeName}`;
+    const fileRef = storageRef(storage, path);
+    await uploadBytes(fileRef, attachment.file, {
+      contentType: attachment.type || "application/octet-stream",
+    });
+    const url = await getDownloadURL(fileRef);
+    uploads.push({
+      id: attachment.id,
+      name: attachment.name,
+      size: attachment.size,
+      friendlySize: attachment.friendlySize,
+      type: attachment.type,
+      extension: attachment.extension,
+      url,
+      storagePath: path,
+    });
+  }
+
+  return uploads;
+}
+
+async function logActivity(chatId, title, detail) {
+  try {
+    await addDoc(collection(doc(db, "chats", chatId), "activity"), {
+      title,
+      detail: detail || "",
+      ts: serverTimestamp(),
+    });
+  } catch (error) {
+    console.warn("Unable to record activity", error);
+  }
+}
+
+function handleChatClosed() {
+  if (ChatIdExists()) {
+    updateStatusLabel("Chat ended by support team.");
+  } else {
+    updateStatusLabel("Conversation unavailable. Please start a new chat.");
+  }
+  localStorage.removeItem(CHAT_ID_STORAGE_KEY);
+  activeConversation = null;
+  if (chatUnsubscribe) {
+    chatUnsubscribe();
+    chatUnsubscribe = null;
+  }
+  if (messagesUnsubscribe) {
+    messagesUnsubscribe();
+    messagesUnsubscribe = null;
+  }
+  render();
+}
+
+function ChatIdExists() {
+  return !!(activeConversation && activeConversation.id);
 }
 
 function render() {
@@ -207,95 +419,79 @@ function renderTimeline() {
     return;
   }
 
-  const messages = activeConversation.messages || [];
-  messages
-    .slice()
-    .sort((a, b) => (a.ts || 0) - (b.ts || 0))
-    .forEach((message) => {
-      const wrapper = document.createElement("div");
-      wrapper.className = "user-message";
-      if (message.sender === "agent") {
-        wrapper.classList.add("user-message--agent");
-      } else if (message.sender === "visitor") {
-        wrapper.classList.add("user-message--customer");
-      } else {
-        wrapper.classList.add("user-message--system");
-      }
+  const messages = Array.isArray(activeConversation.messages)
+    ? activeConversation.messages
+    : [];
 
-      if (message.sender !== "system") {
+  messages.forEach((message) => {
+    const wrapper = document.createElement("div");
+    wrapper.className = "user-message";
+    if (message.sender === "agent") {
+      wrapper.classList.add("user-message--agent");
+    } else if (message.sender === "visitor") {
+      wrapper.classList.add("user-message--customer");
+    } else {
+      wrapper.classList.add("user-message--system");
+    }
+
+    const bubble = document.createElement("div");
+    bubble.className = "user-message__bubble";
+
+    if (message.text) {
+      const textEl = document.createElement("p");
+      textEl.textContent = message.text;
+      bubble.appendChild(textEl);
+    }
+
+    if (Array.isArray(message.attachments) && message.attachments.length) {
+      const list = document.createElement("div");
+      list.className = "user-message__attachments";
+      message.attachments.forEach((file) => {
+        const link = document.createElement("a");
+        link.className = "user-attachment";
+        link.href = file.url || file.dataUrl || "#";
+        link.download = file.name;
+        link.target = "_blank";
+        link.rel = "noopener";
+
+        if ((file.type || "").startsWith("image/") && (file.url || file.dataUrl)) {
+          const img = document.createElement("img");
+          img.src = file.url || file.dataUrl;
+          img.alt = file.name;
+          link.appendChild(img);
+        } else {
+          const badge = document.createElement("span");
+          badge.className = "user-attachment__badge";
+          badge.textContent = (file.extension || "FILE").slice(0, 4);
+          link.appendChild(badge);
+        }
+
         const meta = document.createElement("div");
-        meta.className = "message-meta";
-        if (message.sender === "visitor") meta.classList.add("message-meta--right");
-        const senderLabel = message.sender === "agent" ? (message.name || "Support") : "You";
-        meta.innerHTML = `<span>${senderLabel}</span><span>${formatMessageTimestamp(message.ts)}</span>`;
-        wrapper.appendChild(meta);
-      }
+        meta.className = "user-attachment__meta";
+        const sizeLabel =
+          file.friendlySize || formatFileSize(file.size || 0);
+        meta.innerHTML = `<strong>${file.name}</strong><span>${sizeLabel}</span>`;
+        link.appendChild(meta);
+        list.appendChild(link);
+      });
+      bubble.appendChild(list);
+    }
 
-      const bubble = document.createElement("div");
-      bubble.className = "message-bubble";
-      if (message.sender === "agent") {
-        bubble.classList.add("message-bubble--agent");
-      } else if (message.sender === "visitor") {
-        bubble.classList.add("message-bubble--user");
-      } else {
-        bubble.classList.add("message-bubble--system");
-      }
-      bubble.textContent = message.text || (message.attachments && message.attachments.length ? "Sent attachments" : "");
-      wrapper.appendChild(bubble);
+    const meta = document.createElement("footer");
+    meta.className = "user-message__meta";
+    meta.textContent = formatMessageTimestamp(message.ts);
+    bubble.appendChild(meta);
 
-      if (Array.isArray(message.attachments) && message.attachments.length > 0) {
-        const list = document.createElement("div");
-        list.className = "message-attachments";
-        message.attachments.forEach((file) => {
-          const link = document.createElement("a");
-          link.className = "message-attachment";
-          link.href = file.dataUrl;
-          link.download = file.name;
-          link.target = "_blank";
-          link.rel = "noopener";
-
-          if (file.type && file.type.startsWith("image/")) {
-            const thumb = document.createElement("img");
-            thumb.className = "message-attachment__thumb";
-            thumb.src = file.dataUrl;
-            thumb.alt = file.name;
-            link.appendChild(thumb);
-          } else {
-            const placeholder = document.createElement("div");
-            placeholder.className = "message-attachment__thumb";
-            placeholder.textContent = (file.extension || "FILE").slice(0, 4);
-            placeholder.style.display = "flex";
-            placeholder.style.alignItems = "center";
-            placeholder.style.justifyContent = "center";
-            placeholder.style.fontSize = "0.7rem";
-            placeholder.style.color = "rgba(255,255,255,0.7)";
-            link.appendChild(placeholder);
-          }
-
-          const meta = document.createElement("div");
-          meta.className = "message-attachment__meta";
-          const nameEl = document.createElement("strong");
-          nameEl.textContent = file.name;
-          const sizeEl = document.createElement("span");
-          sizeEl.textContent = file.friendlySize || formatFileSize(file.size || 0);
-          meta.appendChild(nameEl);
-          meta.appendChild(sizeEl);
-          link.appendChild(meta);
-
-          list.appendChild(link);
-        });
-        wrapper.appendChild(list);
-      }
-
-      timelineEl.appendChild(wrapper);
-    });
+    wrapper.appendChild(bubble);
+    timelineEl.appendChild(wrapper);
+  });
 
   timelineEl.scrollTop = timelineEl.scrollHeight;
 }
 
 function renderStatus() {
   if (!activeConversation) {
-    statusLabel.textContent = "Waiting to connect...";
+    statusLabel.textContent = "Waiting to connect…";
     return;
   }
 
@@ -309,11 +505,10 @@ function renderStatus() {
 function applyComposerState() {
   const isClosed = activeConversation && activeConversation.status === "closed";
   isComposerEnabled = !isClosed;
-  const disabled = !isComposerEnabled;
+  const disabled = !isComposerEnabled || isSendingMessage;
   messageInput.disabled = disabled;
   fileInput.disabled = disabled;
-  form.querySelector(".user-send").disabled = disabled;
-  updateIdentityVisibility();
+  sendButton.disabled = disabled;
 }
 
 function renderAttachmentPreview() {
@@ -327,14 +522,16 @@ function renderAttachmentPreview() {
     const chip = document.createElement("span");
     chip.className = "user-attachment-chip";
     chip.textContent = `${file.name} (${file.friendlySize})`;
+
     const removeBtn = document.createElement("button");
     removeBtn.type = "button";
     removeBtn.setAttribute("aria-label", `Remove ${file.name}`);
-    removeBtn.textContent = "�";
+    removeBtn.textContent = "x";
     removeBtn.addEventListener("click", () => {
       pendingAttachments = pendingAttachments.filter((item) => item.id !== file.id);
       renderAttachmentPreview();
     });
+
     chip.appendChild(removeBtn);
     attachmentPreview.appendChild(chip);
   });
@@ -351,30 +548,31 @@ function autoResizeTextarea() {
   messageInput.style.height = `${messageInput.scrollHeight}px`;
 }
 
-function readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
+function updateIdentityVisibility() {
+  if (!identitySection) return;
+  const hasChat = !!(activeConversation && activeConversation.id);
+  identitySection.hidden = hasChat;
+  identitySection.style.display = hasChat ? "none" : "";
+  if (hintText) {
+    hintText.hidden = hasChat;
+    hintText.style.display = hasChat ? "none" : "";
+  }
 }
 
-
 function formatMessageTimestamp(ts) {
-  if (!ts) return '';
+  if (!ts) return "";
   const date = new Date(ts);
   const now = new Date();
   const sameDay = date.toDateString() === now.toDateString();
   if (sameDay) {
-    return `Today, ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    return `Today, ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
   }
   const yesterday = new Date(now);
   yesterday.setDate(now.getDate() - 1);
   if (date.toDateString() === yesterday.toDateString()) {
-    return `Yesterday, ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    return `Yesterday, ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
   }
-  return `${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+  return `${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }
 
 function formatFileSize(size) {
@@ -401,5 +599,17 @@ function playNotificationSound() {
   try {
     notificationAudio.currentTime = 0;
     notificationAudio.play().catch(() => {});
-  } catch (_) {}
+  } catch (_) {
+    // Ignore autoplay errors in browsers that block audio.
+  }
+}
+
+function sanitizeFileName(name) {
+  return name.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+function toMillis(value) {
+  if (!value) return Date.now();
+  if (typeof value.toMillis === "function") return value.toMillis();
+  return Number(value) || Date.now();
 }
