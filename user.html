@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>22Bet Support Chat</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="user.css">
+</head>
+<body>
+  <div class="user-shell">
+    <header class="user-header">
+      <img src="images/22bet.png" alt="22Bet Logo" class="user-logo">
+      <div class="user-header__meta">
+        <h1>Payment Support Chat</h1>
+        <p>Agents are online around the clock.</p>
+      </div>
+    </header>
+    <main class="user-main">
+      <section class="user-chat">
+        <div class="user-chat__status">
+          <span class="status-dot"></span>
+          <span id="user-status-label">Connecting...</span>
+        </div>
+        <div class="user-chat__body" id="user-timeline"></div>
+        <form class="user-chat__form" id="user-form">
+          <div class="user-form__identity">
+            <label>
+              Your name
+              <input type="text" id="user-name" placeholder="Enter your name" autocomplete="name" required>
+            </label>
+            <label>
+              Email 
+              <input type="email" id="user-email" placeholder="you@example.com" autocomplete="email">
+            </label>
+          </div>
+          <label class="user-form__message" for="user-message">
+            <span class="visually-hidden">Message</span>
+            <textarea id="user-message" rows="1" placeholder="Type your message..." required></textarea>
+          </label>
+          <div class="user-attachment-bar">
+            <label class="user-attach-button" title="Max 5 MB per file">
+              <input type="file" id="user-file-input" multiple>
+              Attach files
+            </label>
+            <div class="user-attachment-preview" id="user-attachment-preview" hidden></div>
+          </div>
+          <button type="submit" class="user-send">Send</button>
+          <p class="user-form__hint">Your conversation is stored in this browser. Clearing browser data removes chat history.</p>
+        </form>
+      </section>
+    </main>
+  </div>
+  <script>
+    const LOCAL_DEV_HOSTS = ["localhost", "127.0.0.1"];
+    const isLocalEnv = LOCAL_DEV_HOSTS.includes(location.hostname) || /^192\.168\./.test(location.hostname) || location.hostname.endsWith(".local");
+    window.SUPPORT_SOCKET_URL = window.SUPPORT_SOCKET_URL || (isLocalEnv ? `${location.protocol}//${location.hostname}:3100` : "");
+    const socketScript = document.createElement('script');
+    socketScript.src = `${window.SUPPORT_SOCKET_URL || ''}/socket.io/socket.io.js`;
+    socketScript.onload = () => {
+      const userScript = document.createElement('script');
+      userScript.src = 'user.js';
+      document.body.appendChild(userScript);
+    };
+    socketScript.onerror = () => console.error('Unable to load chat transport script');
+    document.body.appendChild(socketScript);
+  </script>
+</body>
+</html>
+
+
+
