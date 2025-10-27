@@ -122,12 +122,15 @@ async function onSubmitMessage(event) {
 
     const attachments = await uploadPendingAttachments(chatId);
     const ts = serverTimestamp();
-    await addDoc(collection(chatRef, "messages"), {
+    const messagePayload = {
       sender: "visitor",
       text,
-      attachments,
       ts,
-    });
+    };
+    if (attachments.length) {
+      messagePayload.attachments = attachments;
+    }
+    await addDoc(collection(chatRef, "messages"), messagePayload);
 
     const preview =
       text ||
