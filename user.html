@@ -40,8 +40,8 @@
             <span class="visually-hidden">Message</span>
             <textarea id="user-message" rows="1" placeholder="Type your message..." required></textarea>
           </label>
-          <div class="user-attachment-bar" hidden>
-            <label class="user-attach-button" title="Max 5 MB per file" hidden>
+          <div class="user-attachment-bar" id="user-attachment-bar" style="display: none;" aria-hidden="true">
+            <label class="user-attach-button" title="Max 5 MB per file" style="display: none;">
               <input type="file" id="user-file-input" multiple disabled>
               Attach files
             </label>
