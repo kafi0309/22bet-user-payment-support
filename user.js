@@ -556,6 +556,10 @@ function updateIdentityVisibility() {
   const hasChat = !!(activeConversation && activeConversation.id);
   identitySection.hidden = hasChat;
   identitySection.style.display = hasChat ? "none" : "";
+  nameInput.required = !hasChat;
+  emailInput.required = false;
+  nameInput.disabled = hasChat;
+  emailInput.disabled = hasChat;
   if (hintText) {
     hintText.hidden = hasChat;
     hintText.style.display = hasChat ? "none" : "";
